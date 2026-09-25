@@ -333,6 +333,7 @@ private:
     std::unordered_map<uint32, uint64> BuyingBotZeroValueItemPrices;
     std::unordered_map<uint32, uint64> BuyingBotMaxPricePerItem;
     std::unordered_set<uint32> SellerSafetyBlockedItemIDs;
+    std::unordered_map<uint32, uint64> SellerPriceFloorPerItem;
 
     FactionSpecificAuctionHouseConfig AllianceConfig;
     FactionSpecificAuctionHouseConfig HordeConfig;

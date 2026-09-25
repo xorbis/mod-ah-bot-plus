@@ -12,10 +12,11 @@
  *     discount (limited stock only if it restocks 10+ an hour), the seller bot's lowest possible price, or a
  *     profession recipe made from such items
  *
- * Seller items that feed a profitable loop are kept off the auction house: items the seller could list below their
- * vendor value, and inputs of any recipe, disenchant, prospect, mill or container whose output sells to a vendor for
- * more, or to the buyer for more than SafetyMargin, of what the input cost. When such a loop's input comes from a
- * vendor or from recipes instead, the buyer's ceilings for its outputs are lowered until the loop loses money.
+ * Loops through the seller bot's items: when crafting, disenchanting, prospecting, milling or opening them pays more
+ * (to a vendor, or to the buyer after SafetyMargin) than the input cost, the seller's minimum price for the items in
+ * the loop is raised just enough to close it; only when that would take more than MaxSellerFloorRaise are they kept
+ * off the auction house, as are items the seller could list below their vendor value. When a loop's input comes from
+ * a vendor instead, the buyer's ceilings for its outputs are lowered until the loop loses money.
  */
 
 #include "AuctionHouseBot.h"
@@ -28,6 +29,7 @@
 #include "SpellInfo.h"
 #include "SpellMgr.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
@@ -47,7 +49,9 @@ namespace
     constexpr double VendorLoopRestockPerHour = 10.0;
     constexpr uint32 MaxLootDepth = 6;
     constexpr uint32 MaxRecipeDepth = 10;
-    constexpr uint32 MaxPolicyRounds = 20;
+    constexpr uint32 MaxPolicyRounds = 50;
+    // A loop is closed by raising the seller's minimum price for its items at most this much; beyond that they are not listed
+    constexpr double MaxSellerFloorRaise = 20.0;
 
     struct LootRow
     {
@@ -208,6 +212,7 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
 {
     BuyingBotMaxPricePerItem.clear();
     SellerSafetyBlockedItemIDs.clear();
+    SellerPriceFloorPerItem.clear();
 
     // Vendor items sold for gold. Unlimited ones and ones restocking at least VendorLoopRestockPerHour (summed over
     // every vendor) feed loops; the slower ones only cap what the buyer pays for the item itself, since a loop
@@ -306,6 +311,7 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
             addProcess(0, 1, &recipe, spellLoot, recipe.SpellId, 0.0, "recipe");
 
     std::unordered_map<uint32, double> caps;
+    std::unordered_map<uint32, double> sellerFloors;
     uint32 rounds = 0;
     uint32 outputAdjustments = 0;
     bool settled = false;
@@ -329,8 +335,12 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
             if (ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId))
                 offerCost(itemId, proto->BuyPrice * VendorBestDiscount, CostSource::Vendor, nullptr);
         for (auto const& [itemId, price] : sellerMinimumPrices)
-            if (!SellerSafetyBlockedItemIDs.count(itemId))
-                offerCost(itemId, price, CostSource::Seller, nullptr);
+        {
+            if (SellerSafetyBlockedItemIDs.count(itemId))
+                continue;
+            auto floorItr = sellerFloors.find(itemId);
+            offerCost(itemId, floorItr != sellerFloors.end() ? std::max(price, floorItr->second) : price, CostSource::Seller, nullptr);
+        }
 
         auto recipeCost = [&costs](CraftRecipe const& recipe, double& outCost)
         {
@@ -357,23 +367,18 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
                 break;
         }
 
-        // The seller bot's items somewhere down the cheapest way to obtain an item
-        std::function<void(uint32, std::unordered_set<uint32>&, uint32)> collectSellerItems =
-            [&](uint32 itemId, std::unordered_set<uint32>& out, uint32 depth)
+        // How many of each seller bot item go into the cheapest way to obtain an item
+        std::function<void(uint32, double, std::unordered_map<uint32, double>&, uint32)> collectSellerItems =
+            [&](uint32 itemId, double quantity, std::unordered_map<uint32, double>& out, uint32 depth)
         {
             auto itr = costs.find(itemId);
             if (itr == costs.end() || depth > MaxRecipeDepth)
                 return;
             if (itr->second.Source == CostSource::Seller)
-                out.insert(itemId);
+                out[itemId] += quantity;
             else if (itr->second.Source == CostSource::Craft)
                 for (auto const& [reagent, count] : itr->second.Recipe->Reagents)
-                    collectSellerItems(reagent, out, depth + 1);
-        };
-        auto collectRecipeSellerItems = [&](CraftRecipe const& recipe, std::unordered_set<uint32>& out)
-        {
-            for (auto const& [reagent, count] : recipe.Reagents)
-                collectSellerItems(reagent, out, 0);
+                    collectSellerItems(reagent, quantity * count / itr->second.Recipe->CreatedCount, out, depth + 1);
         };
 
         caps.clear();
@@ -391,14 +396,27 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
         }
 
         bool changed = false;
-        auto blockSellerItems = [&](std::unordered_set<uint32> const& sellerItems, char const* reason, uint32 itemOrSpell, double paid, double cost)
+        // A loop through the seller bot's items: raise their minimum price just enough that the input costs the target,
+        // or keep them off the auction house when that cannot work
+        auto raiseSellerFloors = [&](std::unordered_map<uint32, double> const& sellerItems, double inputCost, double target, char const* reason, uint32 itemOrSpell)
         {
-            for (uint32 sellerItem : sellerItems)
-                SellerSafetyBlockedItemIDs.insert(sellerItem);
+            double sellerShare = 0.0;
+            for (auto const& [itemId, quantity] : sellerItems)
+                sellerShare += quantity * costs[itemId].Cost;
+            double otherShare = inputCost - sellerShare;
+            double factor = sellerShare > 0.0 ? std::max((target * 1.001 - otherShare) / sellerShare, 1.001) : 0.0;
+            bool raise = sellerShare > 0.0 && factor <= MaxSellerFloorRaise;
+            for (auto const& [itemId, quantity] : sellerItems)
+            {
+                if (raise)
+                    sellerFloors[itemId] = std::max(sellerFloors[itemId], costs[itemId].Cost * factor);
+                else
+                    SellerSafetyBlockedItemIDs.insert(itemId);
+            }
             changed = true;
             if (debug_Out)
-                LOG_INFO("module", "AHBotPolicy: {} {} pays {} for a {} input, {} seller item(s) kept off the auction house",
-                    reason, itemOrSpell, uint64(paid), uint64(cost), sellerItems.size());
+                LOG_INFO("module", "AHBotPolicy: {} {} pays {} for a {} input, {} seller item(s) {}", reason, itemOrSpell, uint64(target), uint64(inputCost),
+                    sellerItems.size(), raise ? fmt::format("raised {:.2f}x", factor) : std::string("kept off the auction house"));
         };
 
         // Crafting from the seller's items and vendoring the result
@@ -407,23 +425,24 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
             if (cost.Source != CostSource::Craft)
                 continue;
             ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId);
-            if (!proto || proto->SellPrice <= cost.Cost)
+            if (!proto || proto->SellPrice <= cost.Cost * 1.0001)
                 continue;
-            std::unordered_set<uint32> sellerItems;
-            collectSellerItems(itemId, sellerItems, 0);
+            std::unordered_map<uint32, double> sellerItems;
+            collectSellerItems(itemId, 1.0, sellerItems, 0);
             if (!sellerItems.empty())
-                blockSellerItems(sellerItems, "vendoring crafted item", itemId, proto->SellPrice, cost.Cost);
+                raiseSellerFloors(sellerItems, cost.Cost, proto->SellPrice, "vendoring crafted item", itemId);
         }
 
         for (LootProcess const& process : processes)
         {
             double inputCost = 0.0;
-            std::unordered_set<uint32> sellerItems;
+            std::unordered_map<uint32, double> sellerItems;
             if (process.Recipe)
             {
                 if (!recipeCost(*process.Recipe, inputCost))
                     continue;
-                collectRecipeSellerItems(*process.Recipe, sellerItems);
+                for (auto const& [reagent, count] : process.Recipe->Reagents)
+                    collectSellerItems(reagent, count, sellerItems, 0);
             }
             else
             {
@@ -431,7 +450,7 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
                 if (itr == costs.end())
                     continue;
                 inputCost = itr->second.Cost * process.SourceCount;
-                collectSellerItems(process.SourceItem, sellerItems, 0);
+                collectSellerItems(process.SourceItem, process.SourceCount, sellerItems, 0);
             }
 
             double buyerValue = 0.0;
@@ -446,12 +465,12 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
             }
 
             bool buyerLoop = buyerValue > inputCost * SafetyMargin * 1.0001;
+            bool vendorLoop = vendorValue > inputCost * 1.0001;
+            uint32 itemOrSpell = process.Recipe ? process.Recipe->SpellId : process.SourceItem;
             if (!sellerItems.empty())
             {
-                if (buyerLoop)
-                    blockSellerItems(sellerItems, process.Name, process.Recipe ? process.Recipe->SpellId : process.SourceItem, buyerValue, inputCost);
-                else if (vendorValue > inputCost)
-                    blockSellerItems(sellerItems, process.Name, process.Recipe ? process.Recipe->SpellId : process.SourceItem, vendorValue, inputCost);
+                if (buyerLoop || vendorLoop)
+                    raiseSellerFloors(sellerItems, inputCost, std::max(buyerValue / SafetyMargin, vendorValue), process.Name, itemOrSpell);
                 continue;
             }
             if (!buyerLoop)
@@ -469,7 +488,7 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
             ++outputAdjustments;
             if (debug_Out)
                 LOG_INFO("module", "AHBotPolicy: {} {} pays {} for a {} input, output ceilings scaled by {:.3f}",
-                    process.Name, process.Recipe ? process.Recipe->SpellId : process.SourceItem, uint64(buyerValue), uint64(inputCost), factor);
+                    process.Name, itemOrSpell, uint64(buyerValue), uint64(inputCost), factor);
         }
 
         settled = !changed;
@@ -483,15 +502,24 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
 
     for (auto const& [itemId, cap] : caps)
         BuyingBotMaxPricePerItem[itemId] = uint64(cap);
+    for (auto const& [itemId, floor] : sellerFloors)
+        if (!SellerSafetyBlockedItemIDs.count(itemId) && floor > sellerMinimumPrices[itemId])
+            SellerPriceFloorPerItem[itemId] = uint64(std::ceil(floor));
 
     if (debug_Out)
+    {
         for (auto const& [itemId, listedPrice] : BuyingBotZeroValueItemPrices)
         {
             auto capItr = BuyingBotMaxPricePerItem.find(itemId);
             LOG_INFO("module", "AHBotPolicy: zero-value item {} listed at {}, buyer pays at most {}", itemId, listedPrice,
                 capItr != BuyingBotMaxPricePerItem.end() ? capItr->second : 0);
         }
+        for (auto const& [itemId, floor] : SellerPriceFloorPerItem)
+            LOG_INFO("module", "AHBotPolicy: seller item {} minimum price {} (was {})", itemId, floor, uint64(sellerMinimumPrices[itemId]));
+        for (uint32 itemId : SellerSafetyBlockedItemIDs)
+            LOG_INFO("module", "AHBotPolicy: seller item {} kept off the auction house", itemId);
+    }
 
-    LOG_INFO("module", "AuctionHouseBot: price policy settled in {} rounds: buyer ceilings for {} items, {} output ceilings lowered, {} seller items kept off the auction house ({} below vendor value), {} recipes and {} loot processes checked",
-        rounds, BuyingBotMaxPricePerItem.size(), outputAdjustments, SellerSafetyBlockedItemIDs.size(), belowVendorValue, recipes.size(), processes.size());
+    LOG_INFO("module", "AuctionHouseBot: price policy settled in {} rounds: buyer ceilings for {} items, {} output ceilings lowered, {} seller items with a raised minimum price, {} kept off the auction house ({} below vendor value), {} recipes and {} loot processes checked",
+        rounds, BuyingBotMaxPricePerItem.size(), outputAdjustments, SellerPriceFloorPerItem.size(), SellerSafetyBlockedItemIDs.size(), belowVendorValue, recipes.size(), processes.size());
 }

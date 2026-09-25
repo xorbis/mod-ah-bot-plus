@@ -1181,6 +1181,14 @@ void AuctionHouseBot::AddNewAuctions(std::vector<Player*> AHBPlayers, FactionSpe
             uint64 bidPrice = 0;
             CalculateItemValue(prototype, bidPrice, buyoutPrice);
 
+            // The price policy's minimum for items that would otherwise feed a gold loop (AuctionHouseBotBuyerPolicy.cpp)
+            auto priceFloor = SellerPriceFloorPerItem.find(itemID);
+            if (priceFloor != SellerPriceFloorPerItem.end() && buyoutPrice < priceFloor->second)
+            {
+                buyoutPrice = urand(priceFloor->second, priceFloor->second * (1.0f + BuyoutVariationAddPercent));
+                bidPrice = std::max<uint64>(bidPrice, priceFloor->second);
+            }
+
             // Define a duration
             uint32 etime = urand(ListingExpireTimeInSecondsMin, ListingExpireTimeInSecondsMax);
 
