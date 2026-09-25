@@ -9,7 +9,8 @@
  *   - items with a vendor value: at most Buyer.MaxVendorValueMultiplier(.Rare) times that value
  *   - items without a vendor value: only the ones listed in Buyer.ZeroValueItemPrices (enchanting materials)
  *   - never more than SafetyMargin of the cheapest known way to obtain the item: a vendor at the best reputation
- *     discount, the seller bot's lowest possible price, or a profession recipe made from such items
+ *     discount (limited stock only if it restocks 10+ an hour), the seller bot's lowest possible price, or a
+ *     profession recipe made from such items
  *
  * Seller items that feed a profitable loop are kept off the auction house: items the seller could list below their
  * vendor value, and inputs of any recipe, disenchant, prospect, mill or container whose output sells to a vendor for
@@ -41,6 +42,9 @@ namespace
     // The buyer pays at most this share of the cheapest known way to obtain an item. With the 5% auction house cut on
     // top, any buy-and-resell loop loses at least 19%
     constexpr double SafetyMargin = 0.85;
+    // A vendor with limited stock only counts as a cheap source for loops when it restocks at least this many items
+    // an hour, summed over every vendor selling the item
+    constexpr double VendorLoopRestockPerHour = 10.0;
     constexpr uint32 MaxLootDepth = 6;
     constexpr uint32 MaxRecipeDepth = 10;
     constexpr uint32 MaxPolicyRounds = 20;
@@ -205,10 +209,13 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
     BuyingBotMaxPricePerItem.clear();
     SellerSafetyBlockedItemIDs.clear();
 
-    // Vendor items: sold for gold at all, and sold for gold without a stock limit
-    std::unordered_set<uint32> vendorGoldItems;
+    // Vendor items sold for gold. Unlimited ones and ones restocking at least VendorLoopRestockPerHour (summed over
+    // every vendor) feed loops; the slower ones only cap what the buyer pays for the item itself, since a loop
+    // through a few items every 12 hours is worth next to nothing
+    std::unordered_set<uint32> vendorLoopItems;
+    std::unordered_set<uint32> vendorSlowItems;
     std::unordered_set<uint32> vendorUnlimitedItems;
-    if (QueryResult result = WorldDatabase.Query("SELECT item, MAX(maxcount = 0 AND ExtendedCost = 0), MAX(ExtendedCost = 0) FROM npc_vendor WHERE item > 0 GROUP BY item"))
+    if (QueryResult result = WorldDatabase.Query("SELECT item, MAX(maxcount = 0), SUM(IF(maxcount > 0 AND incrtime > 0, maxcount * 3600.0 / incrtime, 0)) FROM npc_vendor WHERE item > 0 AND ExtendedCost = 0 GROUP BY item"))
     {
         do
         {
@@ -216,8 +223,10 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
             uint32 itemId = fields[0].Get<uint32>();
             if (fields[1].Get<int64>())
                 vendorUnlimitedItems.insert(itemId);
-            if (fields[2].Get<int64>())
-                vendorGoldItems.insert(itemId);
+            if (fields[1].Get<int64>() || fields[2].Get<double>() >= VendorLoopRestockPerHour)
+                vendorLoopItems.insert(itemId);
+            else
+                vendorSlowItems.insert(itemId);
         } while (result->NextRow());
     }
 
@@ -316,7 +325,7 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
             }
             return false;
         };
-        for (uint32 itemId : vendorGoldItems)
+        for (uint32 itemId : vendorLoopItems)
             if (ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId))
                 offerCost(itemId, proto->BuyPrice * VendorBestDiscount, CostSource::Vendor, nullptr);
         for (auto const& [itemId, price] : sellerMinimumPrices)
@@ -374,6 +383,9 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
             auto itr = costs.find(itemId);
             if (itr != costs.end())
                 cap = std::min(cap, itr->second.Cost * SafetyMargin);
+            if (vendorSlowItems.count(itemId))
+                if (ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId))
+                    cap = std::min(cap, proto->BuyPrice * VendorBestDiscount * SafetyMargin);
             if (cap >= 1.0)
                 caps[itemId] = cap;
         }
@@ -471,6 +483,14 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
 
     for (auto const& [itemId, cap] : caps)
         BuyingBotMaxPricePerItem[itemId] = uint64(cap);
+
+    if (debug_Out)
+        for (auto const& [itemId, listedPrice] : BuyingBotZeroValueItemPrices)
+        {
+            auto capItr = BuyingBotMaxPricePerItem.find(itemId);
+            LOG_INFO("module", "AHBotPolicy: zero-value item {} listed at {}, buyer pays at most {}", itemId, listedPrice,
+                capItr != BuyingBotMaxPricePerItem.end() ? capItr->second : 0);
+        }
 
     LOG_INFO("module", "AuctionHouseBot: price policy settled in {} rounds: buyer ceilings for {} items, {} output ceilings lowered, {} seller items kept off the auction house ({} below vendor value), {} recipes and {} loot processes checked",
         rounds, BuyingBotMaxPricePerItem.size(), outputAdjustments, SellerSafetyBlockedItemIDs.size(), belowVendorValue, recipes.size(), processes.size());
