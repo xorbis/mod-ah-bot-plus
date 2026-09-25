@@ -324,6 +324,16 @@ private:
     float AdvancedListingRuleUseDropRatesMinDropRate;
     std::unordered_set<uint32> QuestRewardItemIDs;
 
+    // XorWoW buyer price policy (AuctionHouseBotBuyerPolicy.cpp): the buyer pays a fixed ceiling per item, capped by
+    // vendor value and kept below every cheap way to obtain the item, so selling to it never creates free gold
+    uint32 BuyingBotMinQuality;
+    uint32 BuyingBotMaxQuality;
+    float BuyingBotMaxVendorValueMultiplier;
+    float BuyingBotMaxVendorValueMultiplierRare;
+    std::unordered_map<uint32, uint64> BuyingBotZeroValueItemPrices;
+    std::unordered_map<uint32, uint64> BuyingBotMaxPricePerItem;
+    std::unordered_set<uint32> SellerSafetyBlockedItemIDs;
+
     FactionSpecificAuctionHouseConfig AllianceConfig;
     FactionSpecificAuctionHouseConfig HordeConfig;
     FactionSpecificAuctionHouseConfig NeutralConfig;
@@ -359,7 +369,7 @@ public:
     const char* GetQualityName(ItemQualities quality);
     const char* GetCategoryName(ItemClass category);
     uint32 GetStackSizeForItem(ItemTemplate const* itemProto) const;
-    void CalculateItemValue(ItemTemplate const* itemProto, uint64& outBidPrice, uint64& outBuyoutPrice);
+    void CalculateItemValue(ItemTemplate const* itemProto, uint64& outBidPrice, uint64& outBuyoutPrice, bool lowestRoll = false);
     void PopulateItemDropChances();
     void PopulateItemDropChancesForCategoryAndQuality(ItemClass category, std::string qualities);
     void InitializeAdvancedListingRuleUseDropRatesTiers();
@@ -380,6 +390,8 @@ public:
     void AddNewAuctionBuyerBotBid(std::vector<Player*> AHBPlayers, FactionSpecificAuctionHouseConfig* config);
     void PopulateVendorItemsPrices();
     void CleanupExpiredAuctionItems();
+    void BuildBuyerPriceCaps();
+    uint64 GetSellerMinimumPricePerItem(ItemTemplate const* itemProto);
 
     template <typename ValueType>
     void AddItemValuePairsToItemIDMap(std::unordered_map<uint32, ValueType>& workingValueToItemIDMap, std::string valueToItemIDMap);

@@ -313,6 +313,52 @@ AuctionHouseBot.Buyer.PreventOverpayingForVendorItems = true
 AuctionHouseBot.Buyer.BidAgainstPlayers = false
 
 ###############################################################################
+# PRICE POLICY (XorWoW)
+#    The buyer bot pays with gold that comes from nowhere and the seller bot
+#    creates its items from nothing, so at startup and on .ahbot reload the
+#    module works out one price ceiling per item for the buyer and a list of
+#    items the seller must not list. The buyer never buys:
+#     - grey items, items above Buyer.MaxQuality, and items a vendor sells for
+#       gold without a stock limit
+#     - items with no vendor value, except the ones in Buyer.ZeroValueItemPrices
+#    and never pays more than:
+#     - Buyer.MaxVendorValueMultiplier (.Rare for blue items) x vendor value
+#     - 85% of the cheapest known way to obtain the item: a vendor at the best
+#       reputation discount, the seller bot's lowest possible price, or a
+#       profession recipe made from those
+#    Seller items that feed a profitable loop are never listed: items it could
+#    list below their vendor value, and inputs of any recipe, disenchant,
+#    prospect, mill or container whose output sells for more than the input
+#    cost. When the input of such a loop comes from a vendor, the buyer's
+#    ceilings for the outputs are lowered instead.
+#    The worldserver log shows one "price policy settled" line with the counts;
+#    AuctionHouseBot.DEBUG lists every adjustment.
+#    AcceptablePriceModifier still applies but can only lower the ceilings.
+#
+#    AuctionHouseBot.Buyer.MinQuality
+#    AuctionHouseBot.Buyer.MaxQuality
+#        Lowest and highest item quality the buyer buys.
+#        (0) Poor, (1) Common, (2) Uncommon, (3) Rare, (4) Epic
+#    Default: 1 and 3
+#    AuctionHouseBot.Buyer.MaxVendorValueMultiplier
+#    AuctionHouseBot.Buyer.MaxVendorValueMultiplier.Rare
+#        The most the buyer pays, as a multiple of the item's vendor value.
+#        The .Rare value is used for blue items.
+#    Default: 2.0 and 3.0
+#    AuctionHouseBot.Buyer.ZeroValueItemPrices
+#        Comma separated "itemID:copper" list of items without a vendor value
+#        the buyer still buys, at most at that price. These ignore the quality
+#        limits above (shards are blue, crystals epic) but not the rest.
+#    Default: enchanting dusts, essences, shards and crystals
+###############################################################################
+
+AuctionHouseBot.Buyer.MinQuality = 1
+AuctionHouseBot.Buyer.MaxQuality = 3
+AuctionHouseBot.Buyer.MaxVendorValueMultiplier = 2.0
+AuctionHouseBot.Buyer.MaxVendorValueMultiplier.Rare = 3.0
+AuctionHouseBot.Buyer.ZeroValueItemPrices = 10940:400,10938:500,10939:1500,10978:1500,11083:800,10998:1000,11082:3000,11084:3000,11137:1500,11134:2000,11135:6000,11138:3000,11139:6000,11176:3000,11174:4000,11175:12000,11177:5000,11178:12000,16204:5000,16202:8000,16203:24000,14343:10000,14344:30000,20725:50000,22445:6000,22447:8000,22446:24000,22448:10000,22449:30000,22450:60000,34054:8000,34056:10000,34055:30000,34053:15000,34052:45000,34057:80000
+
+###############################################################################
 #    AuctionHouseBot.ListProportion.Category*.Quality*
 #        Determines how many of the listings, proportionally, show up as new auctions
 #		 "0" will mean the item classification never shows up.  Values must be whole numbers.

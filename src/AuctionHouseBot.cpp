@@ -284,8 +284,11 @@ uint32 AuctionHouseBot::GetStackSizeForItem(ItemTemplate const* itemProto) const
         return 1;
 }
 
-void AuctionHouseBot::CalculateItemValue(ItemTemplate const* itemProto, uint64& outBidPrice, uint64& outBuyoutPrice)
+void AuctionHouseBot::CalculateItemValue(ItemTemplate const* itemProto, uint64& outBidPrice, uint64& outBuyoutPrice, bool lowestRoll)
 {
+    // lowestRoll gives the cheapest price the seller could ever roll, which the buyer uses as a ceiling
+    auto roll = [lowestRoll](uint32 low, uint32 high) { return lowestRoll ? low : urand(low, high); };
+
     if (CompleteItemValueOverrideEnabled == true)
     {
         auto it = CompleteItemValueOverrideItemListByItemID.find(itemProto->ItemId);
@@ -293,13 +296,13 @@ void AuctionHouseBot::CalculateItemValue(ItemTemplate const* itemProto, uint64& 
         {
             outBuyoutPrice = it->second;
             if (CompleteItemValueOverrideDoApplyBuyoutVariations == true)
-                outBuyoutPrice = urand(outBuyoutPrice * (1.0f - BuyoutVariationReducePercent), outBuyoutPrice * (1.0f + BuyoutVariationAddPercent));
+                outBuyoutPrice = roll(outBuyoutPrice * (1.0f - BuyoutVariationReducePercent), outBuyoutPrice * (1.0f + BuyoutVariationAddPercent));
 
             if (CompleteItemValueOverrideDoApplyBidVariations == true)
             {
                 float sellVarianceBidPriceTopPercent = 1.0f - BidVariationHighReducePercent;
                 float sellVarianceBidPriceBottomPercent = 1.0f - BidVariationLowReducePercent;
-                outBidPrice = urand(sellVarianceBidPriceBottomPercent * outBuyoutPrice, sellVarianceBidPriceTopPercent * outBuyoutPrice);
+                outBidPrice = roll(sellVarianceBidPriceBottomPercent * outBuyoutPrice, sellVarianceBidPriceTopPercent * outBuyoutPrice);
             }
             else
                 outBidPrice = outBuyoutPrice;
@@ -388,9 +391,9 @@ void AuctionHouseBot::CalculateItemValue(ItemTemplate const* itemProto, uint64& 
 
     // Set the minimum price
     if (outBuyoutPrice < PriceMinimumCenterBase)
-        outBuyoutPrice = urand(PriceMinimumCenterBase * (1.0f - BuyoutVariationReducePercent), PriceMinimumCenterBase * (1.0f + BuyoutVariationAddPercent));
+        outBuyoutPrice = roll(PriceMinimumCenterBase * (1.0f - BuyoutVariationReducePercent), PriceMinimumCenterBase * (1.0f + BuyoutVariationAddPercent));
     else
-        outBuyoutPrice = urand(outBuyoutPrice * (1.0f - BuyoutVariationReducePercent), outBuyoutPrice * (1.0f + BuyoutVariationAddPercent));
+        outBuyoutPrice = roll(outBuyoutPrice * (1.0f - BuyoutVariationReducePercent), outBuyoutPrice * (1.0f + BuyoutVariationAddPercent));
 
     // Ensure no multipliers are zero or negative
     if (classPriceMultiplier <= 0.0f)
@@ -442,13 +445,13 @@ void AuctionHouseBot::CalculateItemValue(ItemTemplate const* itemProto, uint64& 
     if (BuyoutBelowVendorVariationAddPercentEnabled == true && outBuyoutPrice < itemProto->SellPrice)
     {
         float minLowPriceAddVariancePercent = 1.0f + BuyoutBelowVendorVariationAddPercent;
-        outBuyoutPrice = urand(itemProto->SellPrice, minLowPriceAddVariancePercent * itemProto->SellPrice);
+        outBuyoutPrice = roll(itemProto->SellPrice, minLowPriceAddVariancePercent * itemProto->SellPrice);
     }
 
     // Calculate a bid price based on a variance against buyout price
     float sellVarianceBidPriceTopPercent = 1.0f - BidVariationHighReducePercent;
     float sellVarianceBidPriceBottomPercent = 1.0f - BidVariationLowReducePercent;
-    outBidPrice = urand(sellVarianceBidPriceBottomPercent * outBuyoutPrice, sellVarianceBidPriceTopPercent * outBuyoutPrice);
+    outBidPrice = roll(sellVarianceBidPriceBottomPercent * outBuyoutPrice, sellVarianceBidPriceTopPercent * outBuyoutPrice);
 
     // Catch any zeros
     if (outBuyoutPrice == 0)
@@ -993,6 +996,9 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
                 ItemListProportionNodesLookup.push_back(curNode);
         }
     }
+
+    // Needs the candidate lists above; also run with the buyer off, it keeps the seller from listing gold loops
+    BuildBuyerPriceCaps();
 }
 
 uint32 AuctionHouseBot::GetRandomItemIDForListing()
@@ -1144,6 +1150,15 @@ void AuctionHouseBot::AddNewAuctions(std::vector<Player*> AHBPlayers, FactionSpe
                     if (debug_Out)
                         LOG_INFO("module", "AHSeller: Is listing item ID {} which is configured for {} multiples from ListMultipliedItemIDs", itemID, ItemListProportionMultipliedItemIDs[itemID]);
                 }
+            }
+
+            // Items that would feed a gold loop stay off the auction house (AuctionHouseBotBuyerPolicy.cpp)
+            if (SellerSafetyBlockedItemIDs.count(itemID))
+            {
+                if (ActiveListMultipleItemID == int(itemID))
+                    ActiveListMultipleItemID = 0;
+                batchCount++;
+                continue;
             }
 
             Player* AHBplayer = AHBPlayers[urand(0, AHBPlayers.size() - 1)];
@@ -1721,11 +1736,15 @@ void AuctionHouseBot::AddNewAuctionBuyerBotBid(std::vector<Player*> AHBPlayers, 
             continue;
         }
 
-        // Calculate a potential price for the item
-        uint64 willingToSpendPerItemPrice = 0;
-        uint64 discardBidPrice = 0;
-        CalculateItemValue(prototype, discardBidPrice, willingToSpendPerItemPrice);
-        willingToSpendPerItemPrice = (uint64)((float)willingToSpendPerItemPrice * BuyingBotAcceptablePriceModifier);
+        // The price policy's ceiling for the item (AuctionHouseBotBuyerPolicy.cpp); items without one are never bought
+        auto maxPriceItr = BuyingBotMaxPricePerItem.find(prototype->ItemId);
+        if (maxPriceItr == BuyingBotMaxPricePerItem.end())
+        {
+            if (debug_Out)
+                LOG_INFO("module", "AHBuyer: Item {} is not bought by the price policy, skipping auction {}", prototype->ItemId, auction->Id);
+            continue;
+        }
+        uint64 willingToSpendPerItemPrice = (uint64)((float)maxPriceItr->second * std::min(BuyingBotAcceptablePriceModifier, 1.0f));
         uint64 willingToPayForStackPrice = willingToSpendPerItemPrice * pItem->GetCount();
 
         // Determine if it's a bid, buyout, or skip
@@ -2018,6 +2037,12 @@ void AuctionHouseBot::InitializeConfiguration()
     if (PreventOverpayingForVendorItems)
         PopulateVendorItemsPrices();
     BuyingBotWillBidAgainstPlayers = sConfigMgr->GetOption<bool>("AuctionHouseBot.Buyer.BidAgainstPlayers", false);
+    BuyingBotMinQuality = sConfigMgr->GetOption<uint32>("AuctionHouseBot.Buyer.MinQuality", ITEM_QUALITY_NORMAL);
+    BuyingBotMaxQuality = sConfigMgr->GetOption<uint32>("AuctionHouseBot.Buyer.MaxQuality", ITEM_QUALITY_RARE);
+    BuyingBotMaxVendorValueMultiplier = sConfigMgr->GetOption<float>("AuctionHouseBot.Buyer.MaxVendorValueMultiplier", 2.0f);
+    BuyingBotMaxVendorValueMultiplierRare = sConfigMgr->GetOption<float>("AuctionHouseBot.Buyer.MaxVendorValueMultiplier.Rare", 3.0f);
+    BuyingBotZeroValueItemPrices.clear();
+    AddItemValuePairsToItemIDMap(BuyingBotZeroValueItemPrices, sConfigMgr->GetOption<std::string>("AuctionHouseBot.Buyer.ZeroValueItemPrices", ""));
 
     // Stack Ratios
     RandomStackRatioConsumable = GetRandomStackValue("AuctionHouseBot.ListingStack.RandomRatio.Consumable", 50);
