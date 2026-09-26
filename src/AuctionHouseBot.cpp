@@ -1751,8 +1751,8 @@ void AuctionHouseBot::AddNewAuctionBuyerBotBid(std::vector<Player*> AHBPlayers, 
         if (maxPriceItr != BuyingBotMaxPricePerItem.end())
             maxPricePerItem = maxPriceItr->second;
 
-        // Auctions undercutting the seller bot's own cheapest listing of the item may be bought up to that listing's
-        // price, within the policy's undercut ceiling
+        // Auctions at least 15% below the seller bot's own cheapest listing of the item may be bought, within the
+        // policy's undercut ceiling
         auto undercutItr = BuyingBotUndercutMaxPricePerItem.find(prototype->ItemId);
         if (undercutItr != BuyingBotUndercutMaxPricePerItem.end())
         {
@@ -1769,7 +1769,7 @@ void AuctionHouseBot::AddNewAuctionBuyerBotBid(std::vector<Player*> AHBPlayers, 
                     cheapestBotListingPerItem = perItem;
             }
             if (cheapestBotListingPerItem > 0)
-                maxPricePerItem = std::max(maxPricePerItem, std::min(cheapestBotListingPerItem, undercutItr->second));
+                maxPricePerItem = std::max(maxPricePerItem, std::min<uint64>(cheapestBotListingPerItem * 0.85, undercutItr->second));
         }
 
         if (maxPricePerItem == 0)

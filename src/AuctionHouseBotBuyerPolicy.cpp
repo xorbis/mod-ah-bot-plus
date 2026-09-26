@@ -11,9 +11,10 @@
  *   - never more than SafetyMargin of the cheapest known way to obtain the item: a vendor at the best reputation
  *     discount (limited stock only if it restocks 10+ an hour), the seller bot's lowest possible price, or a
  *     profession recipe made from such items
- *   - an auction that undercuts the seller bot's own cheapest listing of the item may be bought above the vendor value
- *     ceiling, up to that listing's price but still within SafetyMargin of the cheapest way to obtain it (the seller's
- *     lowest possible price included), so buying from the seller to sell back to the buyer always loses
+ *   - an auction priced at most SafetyMargin of the seller bot's own cheapest live listing of the item may be bought
+ *     above the vendor value ceiling (AuctionHouseBot.cpp), within SafetyMargin of the cheapest other way to obtain it
+ *     (vendor, recipe) and never above the seller's lowest possible price, so buying from the seller to sell back to
+ *     the buyer always loses, however far apart the seller's listings are
  *
  * Loops through the seller bot's items: when crafting, disenchanting, prospecting, milling or opening them pays more
  * (to a vendor, or to the buyer after SafetyMargin) than the input cost, the seller's minimum price for the items in
@@ -327,10 +328,17 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
     {
         ++rounds;
 
-        // Cheapest known way to obtain each item
+        // Cheapest known way to obtain each item, and the cheapest one that is not the seller bot's own listing
         std::unordered_map<uint32, KnownCost> costs;
-        auto offerCost = [&costs](uint32 itemId, double cost, CostSource source, CraftRecipe const* recipe)
+        std::unordered_map<uint32, double> otherCosts;
+        auto offerCost = [&costs, &otherCosts](uint32 itemId, double cost, CostSource source, CraftRecipe const* recipe)
         {
+            if (source != CostSource::Seller)
+            {
+                auto otherItr = otherCosts.find(itemId);
+                if (otherItr == otherCosts.end() || cost < otherItr->second)
+                    otherCosts[itemId] = cost;
+            }
             auto itr = costs.find(itemId);
             if (itr == costs.end() || cost < itr->second.Cost)
             {
@@ -393,8 +401,6 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
         undercutCaps.clear();
         for (auto const& [itemId, baseCap] : baseCaps)
         {
-            // Without the vendor value ceiling; only reachable for items the seller lists, and the seller's own
-            // minimum price is always among the costs of those
             double obtainCap = std::numeric_limits<double>::max();
             auto itr = costs.find(itemId);
             if (itr != costs.end())
@@ -409,8 +415,23 @@ void AuctionHouseBot::BuildBuyerPriceCaps()
             double cap = std::min(baseCap, obtainCap);
             if (cap >= 1.0)
                 caps[itemId] = cap;
-            if (obtainCap > cap && obtainCap >= 1.0 && sellerMinimumPrices.count(itemId) && !SellerSafetyBlockedItemIDs.count(itemId))
-                undercutCaps[itemId] = obtainCap;
+
+            // Undercutting auctions: the runtime also keeps them within SafetyMargin of the seller's cheapest live listing
+            auto sellerItr = sellerMinimumPrices.find(itemId);
+            if (sellerItr == sellerMinimumPrices.end() || SellerSafetyBlockedItemIDs.count(itemId))
+                continue;
+            auto floorItr = sellerFloors.find(itemId);
+            double undercutCap = floorItr != sellerFloors.end() ? std::max(sellerItr->second, floorItr->second) : sellerItr->second;
+            auto otherItr = otherCosts.find(itemId);
+            if (otherItr != otherCosts.end())
+                undercutCap = std::min(undercutCap, otherItr->second * SafetyMargin);
+            if (vendorSlowItems.count(itemId))
+                if (ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId))
+                    undercutCap = std::min(undercutCap, proto->BuyPrice * VendorBestDiscount * SafetyMargin);
+            if (limitItr != outputLimits.end())
+                undercutCap = std::min(undercutCap, limitItr->second);
+            if (undercutCap > cap && undercutCap >= 1.0)
+                undercutCaps[itemId] = undercutCap;
         }
         // What the buyer may pay for an item at most, undercutting auctions included
         auto highestCap = [&caps, &undercutCaps](uint32 itemId)
