@@ -30,6 +30,7 @@
 #include "SharedDefines.h"
 #include "SpellMgr.h"
 #include <cmath>
+#include <algorithm>
 
 #include <set>
 #include <unordered_map>
@@ -1745,14 +1746,39 @@ void AuctionHouseBot::AddNewAuctionBuyerBotBid(std::vector<Player*> AHBPlayers, 
         }
 
         // The price policy's ceiling for the item (AuctionHouseBotBuyerPolicy.cpp); items without one are never bought
+        uint64 maxPricePerItem = 0;
         auto maxPriceItr = BuyingBotMaxPricePerItem.find(prototype->ItemId);
-        if (maxPriceItr == BuyingBotMaxPricePerItem.end())
+        if (maxPriceItr != BuyingBotMaxPricePerItem.end())
+            maxPricePerItem = maxPriceItr->second;
+
+        // Auctions undercutting the seller bot's own cheapest listing of the item may be bought up to that listing's
+        // price, within the policy's undercut ceiling
+        auto undercutItr = BuyingBotUndercutMaxPricePerItem.find(prototype->ItemId);
+        if (undercutItr != BuyingBotUndercutMaxPricePerItem.end())
+        {
+            uint64 cheapestBotListingPerItem = 0;
+            for (auto const& [auctionId, botAuction] : auctionHouse->GetAuctions())
+            {
+                if (botAuction->item_template != prototype->ItemId || botAuction->buyout == 0 || botAuction->itemCount == 0)
+                    continue;
+                if (std::none_of(AHCharacters.begin(), AHCharacters.end(), [&botAuction](AuctionHouseBotCharacter const& character)
+                    { return character.CharacterGUID == botAuction->owner.GetCounter(); }))
+                    continue;
+                uint64 perItem = botAuction->buyout / botAuction->itemCount;
+                if (cheapestBotListingPerItem == 0 || perItem < cheapestBotListingPerItem)
+                    cheapestBotListingPerItem = perItem;
+            }
+            if (cheapestBotListingPerItem > 0)
+                maxPricePerItem = std::max(maxPricePerItem, std::min(cheapestBotListingPerItem, undercutItr->second));
+        }
+
+        if (maxPricePerItem == 0)
         {
             if (debug_Out)
                 LOG_INFO("module", "AHBuyer: Item {} is not bought by the price policy, skipping auction {}", prototype->ItemId, auction->Id);
             continue;
         }
-        uint64 willingToSpendPerItemPrice = (uint64)((float)maxPriceItr->second * std::min(BuyingBotAcceptablePriceModifier, 1.0f));
+        uint64 willingToSpendPerItemPrice = (uint64)((float)maxPricePerItem * std::min(BuyingBotAcceptablePriceModifier, 1.0f));
         uint64 willingToPayForStackPrice = willingToSpendPerItemPrice * pItem->GetCount();
 
         // Determine if it's a bid, buyout, or skip

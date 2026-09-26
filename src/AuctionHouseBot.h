@@ -332,6 +332,9 @@ private:
     float BuyingBotMaxVendorValueMultiplierRare;
     std::unordered_map<uint32, uint64> BuyingBotZeroValueItemPrices;
     std::unordered_map<uint32, uint64> BuyingBotMaxPricePerItem;
+    // Higher ceiling for auctions that undercut the seller bot's own cheapest listing of the item, still below every
+    // cheap way to obtain it; only items where it beats BuyingBotMaxPricePerItem
+    std::unordered_map<uint32, uint64> BuyingBotUndercutMaxPricePerItem;
     std::unordered_set<uint32> SellerSafetyBlockedItemIDs;
     std::unordered_map<uint32, uint64> SellerPriceFloorPerItem;
 

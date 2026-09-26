@@ -326,6 +326,10 @@ AuctionHouseBot.Buyer.BidAgainstPlayers = false
 #     - 85% of the cheapest known way to obtain the item: a vendor at the best
 #       reputation discount, the seller bot's lowest possible price, or a
 #       profession recipe made from those
+#    except for an auction that undercuts the seller bot's own cheapest listing
+#    of the same item: that one is bought up to the listing's price, but still
+#    never above 85% of the cheapest way to obtain it (so a player listing
+#    must be at least 15% below the lowest price the seller could ask).
 #    Seller items that feed a profitable loop are never listed: items it could
 #    list below their vendor value, and inputs of any recipe, disenchant,
 #    prospect, mill or container whose output sells for more than the input
